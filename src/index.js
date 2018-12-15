@@ -7,6 +7,7 @@ const qs = require('querystring');
 const trello = require('./trello');
 const clubhouse = require('./clubhouse');
 const debug = require('debug')('slash-command-template:index');
+const slack = require('./slack');
 
 const app = express();
 
@@ -33,63 +34,16 @@ app.post('/commands', (req, res) => {
 
   // check that the verification token matches expected value
   if (token === process.env.SLACK_VERIFICATION_TOKEN) {
-    // create the dialog payload - includes the dialog structure, Slack API token,
-    // and trigger ID
-    const dialog = {
-      token: process.env.SLACK_ACCESS_TOKEN,
-      trigger_id,
-      dialog: JSON.stringify({
-        title: 'Report an issue',
-        callback_id: 'submit-card',
-        submit_label: 'Submit',
-        elements: [
-          {
-            label: 'Title',
-            type: 'text',
-            name: 'title',
-            value: text,
-            hint: 'for questions/ideas, ping @jeff',
-          },
-          {
-            label: 'Area affected',
-            type: 'select',
-            name: 'category',
-            options: [
-              { label: 'Web App', value: 'web_app' },
-              { label: 'Flow Builder', value: 'crx' },
-              { label: 'SDK', value: 'sdk' },
-              { label: 'NPS', value: 'nps' },
-              { label: 'Mobile', value: 'mobile' },
-              { label: 'General UX', value: 'general_ux' },
-              { label: 'Other', value: 'other' }
-            ],
-          },
-          {
-            label: 'Description',
-            type: 'textarea',
-            name: 'description',
-            placeholder: `Context on the issue. Include Support ticket URL, customers experiencing it, screenshots, links to recordings, etc.`,
-          },
-          {
-            label: 'Steps to reproduce',
-            type: 'textarea',
-            name: 'description_reproduce',
-            optional: true,
-            placeholder: `Steps to reproduce`,
-          }
-        ],
-      }),
-    };
     
-    // open the dialog by calling dialogs.open method and sending the payload
-    axios.post('https://slack.com/api/dialog.open', qs.stringify(dialog))
-      .then((result) => {
-        debug('dialog.open: %o', result.data);
-        res.send('');
-      }).catch((err) => {
-        debug('dialog.open call failed: %o', err);
-        res.sendStatus(500);
-      });
+    slack.postBugDialog(trigger_id, text)
+    .then((result) => {
+      res.send('');
+    })
+    .catch((err) => {
+      console.log(err);
+      res.sendStatus(500);
+    });
+
   } else {
     debug('Verification token mismatch');
     res.sendStatus(500);
@@ -115,67 +69,39 @@ app.post('/interactive-component', (req, res) => {
       const trigger_id = body.trigger_id;
       const text = body.message.text;
       
-      const dialog = {
-        token: process.env.SLACK_ACCESS_TOKEN,
-        trigger_id,
-        dialog: JSON.stringify({
-          title: 'Report an issue',
-          callback_id: 'submit-card',
-          submit_label: 'Submit',
-          elements: [
-            {
-              label: 'Title',
-              type: 'text',
-              name: 'title',
-              value: text,
-              hint: 'for questions/ideas, ping @jeff',
-            },
-            {
-              label: 'Area affected',
-              type: 'select',
-              name: 'category',
-              options: [
-                { label: 'Web App', value: 'web_app' },
-                { label: 'Flow Builder', value: 'crx' },
-                { label: 'SDK', value: 'sdk' },
-                { label: 'NPS', value: 'nps' },
-                { label: 'Mobile', value: 'mobile' },
-                { label: 'General UX', value: 'general_ux' },
-                { label: 'Other', value: 'other' }
-              ],
-            },
-            {
-              label: 'Description',
-              type: 'textarea',
-              name: 'description',
-              placeholder: `Context on the issue. Include Support ticket URL, customers experiencing it, screenshots, links to recordings, etc.`,
-            },
-            {
-              label: 'Steps to reproduce',
-              type: 'textarea',
-              name: 'description_reproduce',
-              optional: true,
-              placeholder: `Steps to reproduce`,
-            }
-          ],
+      slack.postBugDialog(trigger_id, text)
+        .then((result) => {
+          res.send('');
         })
+        .catch((err) => {
+          console.log(err);
+          res.sendStatus(500);
+        });
+      
+    } else if (body.type === "interactive_message") {
+      // this was a button click, we need to take care of it
+      console.log("interactive message body:", body);
+      
+      if (body.actions[0].value != 'true') {
+        return true;
       };
       
-      // open the dialog by calling dialogs.open method and sending the payload
-      axios.post('https://slack.com/api/dialog.open', qs.stringify(dialog))
-      .then((result) => {
-        debug('dialog.open: %o', result.data);
-        res.send('');
-      }).catch((err) => {          
-        debug('dialog.open call failed: %o', err);
-        res.sendStatus(500);
-      });
+      const { user, callback_id } = body;
+      
+      const issueId = callback_id.replace('red_alert_', '');
+      
+      clubhouse.addRedAlertTo(issueId).then((result) => {
+        const { story, notificationChannel } = result;
+        slack.sendRedAlertNotification(user, story, notificationChannel);
+      }).catch((err) => console.log(err));
+      
+      return true;
     } else {
       // this is a dialog submission, just create the Trello card.
       debug(`Form submission received: ${body.submission.trigger_id}`);
       //trello.createCard(body.user.id, body.submission);
       clubhouse.createStory(body.user.id, body.submission);
-  }
+    }
   } else {
     debug('Token mismatch');
     res.sendStatus(500);
